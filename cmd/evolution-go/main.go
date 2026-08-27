@@ -60,6 +60,9 @@ import (
 	server_handler "github.com/evolution-foundation/evolution-go/pkg/server/handler"
 	storage_interfaces "github.com/evolution-foundation/evolution-go/pkg/storage/interfaces"
 	minio_storage "github.com/evolution-foundation/evolution-go/pkg/storage/minio"
+	typebot_handler "github.com/evolution-foundation/evolution-go/pkg/typebot/handler"
+	typebot_model "github.com/evolution-foundation/evolution-go/pkg/typebot/model"
+	typebot_service "github.com/evolution-foundation/evolution-go/pkg/typebot/service"
 	user_handler "github.com/evolution-foundation/evolution-go/pkg/user/handler"
 	user_service "github.com/evolution-foundation/evolution-go/pkg/user/service"
 	whatsmeow_service "github.com/evolution-foundation/evolution-go/pkg/whatsmeow/service"
@@ -71,8 +74,6 @@ var devMode = flag.Bool("dev", false, "Enable development mode")
 var version = "0.0.0"
 
 func init() {
-	// ldflags -X main.version= sets this at compile time.
-	// If not set (or still default), try reading from VERSION file.
 	if version == "0.0.0" {
 		if v, err := os.ReadFile("VERSION"); err == nil {
 			if trimmed := strings.TrimSpace(string(v)); trimmed != "" {
@@ -100,13 +101,12 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 			loggerWrapper,
 		)
 	} else {
-		// Even if initial connection failed, pass the URL so reconnection can work
 		rabbitmqProducer = rabbitmq_producer.NewRabbitMQProducer(
 			nil,
 			config.AmqpGlobalEnabled,
 			config.AmqpGlobalEvents,
 			config.AmqpSpecificEvents,
-			config.AmqpUrl, // Keep the URL for reconnection attempts
+			config.AmqpUrl,
 			loggerWrapper,
 		)
 	}
@@ -132,7 +132,6 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	webhookProducer := webhook_producer.NewWebhookProducer(config.WebhookUrl, loggerWrapper)
 	websocketProducer := websocket_producer.NewWebsocketProducer(loggerWrapper)
 
-	// Cria filas globais se o RabbitMQ global estiver habilitado
 	if config.AmqpGlobalEnabled && conn != nil {
 		logger.LogInfo("Creating global RabbitMQ queues...")
 		if err := rabbitmqProducer.CreateGlobalQueues(); err != nil {
@@ -162,6 +161,15 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	messageRepository := message_repository.NewMessageRepository(db)
 	labelRepository := label_repository.NewLabelRepository(db)
 
+	// ==================== ORDEM CORRETA DE INICIALIZAÇÃO ====================
+
+	// 1. Criar sendMessageService SEM whatsmeowService (nil)
+	sendMessageService := send_service.NewSendService(clientPointer, nil, config, loggerWrapper)
+
+	// Adapter para expor o sendService ao conector do Typebot
+	typebotSendSvc := newTypebotSendAdapter(sendMessageService)
+
+	// 2. Criar whatsmeowService SEM typebotService (nil)
 	whatsmeowService := whatsmeow_service.NewWhatsmeowService(
 		instanceRepository,
 		authDB,
@@ -178,7 +186,9 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		mediaStorage,
 		natsProducer,
 		loggerWrapper,
+		nil, // typebotService será definido depois
 	)
+
 	instanceService := instance_service.NewInstanceService(
 		instanceRepository,
 		killChannel,
@@ -187,7 +197,18 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		config,
 		loggerWrapper,
 	)
-	sendMessageService := send_service.NewSendService(clientPointer, whatsmeowService, config, loggerWrapper)
+
+	// 3. Recriar sendMessageService COM whatsmeowService atualizado
+	sendMessageService = send_service.NewSendService(clientPointer, whatsmeowService, config, loggerWrapper)
+
+	// 4. Criar typebotService COM sendMessageService atualizado
+	typebotService := typebot_service.NewTypebotService(db, config, typebotSendSvc)
+
+	// 5. Atualizar whatsmeowService com o typebotService
+	whatsmeowService.SetTypebotService(typebotService)
+
+	// ==================== FIM DA ORDEM CORRETA ====================
+
 	userService := user_service.NewUserService(clientPointer, whatsmeowService, loggerWrapper)
 	messageService := message_service.NewMessageService(clientPointer, messageRepository, whatsmeowService, loggerWrapper)
 	chatService := chat_service.NewChatService(clientPointer, whatsmeowService, loggerWrapper)
@@ -197,12 +218,10 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	labelService := label_service.NewLabelService(clientPointer, whatsmeowService, labelRepository, loggerWrapper)
 	newsletterService := newsletter_service.NewNewsletterService(clientPointer, whatsmeowService, loggerWrapper)
 
-	// NOVO: PollHandler usando PollService já inicializado no whatsmeowService (evita dupla inicialização)
 	pollHandler := poll_handler.NewPollHandler(whatsmeowService.GetPollService(), loggerWrapper)
 
 	r := gin.Default()
 
-	// CORS middleware — must be before everything else
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -218,11 +237,8 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 
 	r.Use(core.GateMiddleware(runtimeCtx))
 
-	// License routes (always accessible, even without license)
 	core.LicenseRoutes(r, runtimeCtx)
 
-	// Passkey ceremony routes — PUBLIC (called by the browser extension from the
-	// web.whatsapp.com origin, gated only by an opaque ephemeral token).
 	passkey_handler.RegisterRoutes(r, whatsmeowService)
 
 	routes.NewRouter(
@@ -239,6 +255,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		newsletter_handler.NewNewsletterHandler(newsletterService),
 		pollHandler,
 		server_handler.NewServerHandler(),
+		typebot_handler.NewTypebotHandler(typebotService),
 	).AssignRoutes(r)
 
 	if config.ConnectOnStartup {
@@ -250,8 +267,8 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		instanceId := c.Query("instanceId")
 
 		if token != config.GlobalApiKey {
-			logger.LogError("Token inválido: %s", token)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token inválido"})
+			logger.LogError("Token invalido: %s", token)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token invalido"})
 			return
 		}
 
@@ -262,7 +279,14 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 }
 
 func migrate(db *gorm.DB) {
-	err := db.AutoMigrate(&instance_model.Instance{}, &message_model.Message{}, &label_model.Label{})
+	err := db.AutoMigrate(
+		&instance_model.Instance{},
+		&message_model.Message{},
+		&label_model.Label{},
+		&typebot_model.TypebotSettings{},
+		&typebot_model.TypebotBot{},
+		&typebot_model.IntegrationSession{},
+	)
 
 	if err != nil {
 		log.Fatal(err)
@@ -311,11 +335,10 @@ func initPostgresAuthDB(config *config.Config) (*sql.DB, error) {
 		return nil, fmt.Errorf("erro ao conectar ao banco AUTH PostgreSQL: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
 
 	err = db.Ping()
 	if err != nil {
@@ -326,9 +349,6 @@ func initPostgresAuthDB(config *config.Config) (*sql.DB, error) {
 	return db, nil
 }
 
-// @title Evolution GO
-// @version 1.0
-// @description Evolution GO - whatsmeow
 func main() {
 	flag.Parse()
 	if *devMode {
@@ -349,7 +369,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Inicializar PostgreSQL AUTH
 	authDB, err := initPostgresAuthDB(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -358,7 +377,6 @@ func main() {
 		defer authDB.Close()
 	}
 
-	// Manter inicialização do SQLite
 	sqliteDB, exPath, err := initAuthDB(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -369,7 +387,6 @@ func main() {
 
 	migrate(db)
 
-	// Initialize core DB + license runtime
 	core.SetDB(db)
 	if err := core.MigrateDB(); err != nil {
 		log.Fatal("Failed to migrate runtime_configs: ", err)
@@ -382,9 +399,8 @@ func main() {
 	if cfg.AmqpUrl != "" {
 		logger.LogInfo("Attempting to connect to RabbitMQ...")
 
-		// Create connection with heartbeat to prevent timeouts
 		amqpConfig := amqp.Config{
-			Heartbeat: 30 * time.Second, // Send heartbeat every 30 seconds
+			Heartbeat: 30 * time.Second,
 			Locale:    "en_US",
 		}
 
@@ -407,7 +423,6 @@ func main() {
 
 	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
 
-	// Graceful shutdown with heartbeat
 	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
 	defer heartbeatCancel()
 
@@ -431,7 +446,6 @@ func main() {
 	<-quit
 	logger.LogInfo("[SHUTDOWN] Signal received, shutting down...")
 
-	// Stop heartbeat loop
 	heartbeatCancel()
 
 	core.Shutdown(runtimeCtx)

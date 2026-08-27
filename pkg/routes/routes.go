@@ -20,6 +20,7 @@ import (
 	poll_handler "github.com/evolution-foundation/evolution-go/pkg/poll/handler"
 	send_handler "github.com/evolution-foundation/evolution-go/pkg/sendMessage/handler"
 	server_handler "github.com/evolution-foundation/evolution-go/pkg/server/handler"
+	typebot_handler "github.com/evolution-foundation/evolution-go/pkg/typebot/handler"
 	user_handler "github.com/evolution-foundation/evolution-go/pkg/user/handler"
 )
 
@@ -38,6 +39,7 @@ type Routes struct {
 	newsletterHandler       newsletter_handler.NewsletterHandler
 	pollHandler             *poll_handler.PollHandler
 	serverHandler           server_handler.ServerHandler
+	typebotHandler          typebot_handler.TypebotHandler
 }
 
 func (r *Routes) AssignRoutes(eng *gin.Engine) {
@@ -118,7 +120,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/poll", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendPoll)
 			routes.POST("/sticker", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendSticker)
 			routes.POST("/location", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendLocation)
-			routes.POST("/contact", r.jidValidationMiddleware.ValidateContactFields(), r.sendHandler.SendContact) // TODO: send multiple contacts
+			routes.POST("/contact", r.jidValidationMiddleware.ValidateContactFields(), r.sendHandler.SendContact)
 			routes.POST("/button", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendButton)
 			routes.POST("/list", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendList)
 			routes.POST("/carousel", r.jidValidationMiddleware.ValidateNumberFieldWithFormatJid(), r.sendHandler.SendCarousel)
@@ -126,6 +128,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/status/media", r.sendHandler.SendStatusMedia)
 		}
 	}
+
 	routes = eng.Group("/user")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -144,6 +147,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/profileStatus", r.userHandler.SetProfileStatus)
 		}
 	}
+
 	routes = eng.Group("/message")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -155,22 +159,24 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/downloadmedia", r.messageHandler.DownloadMedia)
 			routes.POST("/status", r.messageHandler.GetMessageStatus)
 			routes.POST("/delete", r.jidValidationMiddleware.ValidateNumberField(), r.messageHandler.DeleteMessageEveryone)
-			routes.POST("/edit", r.jidValidationMiddleware.ValidateNumberField(), r.messageHandler.EditMessage) // TODO: edit MediaMessage too
+			routes.POST("/edit", r.jidValidationMiddleware.ValidateNumberField(), r.messageHandler.EditMessage)
 		}
 	}
+
 	routes = eng.Group("/chat")
 	{
 		routes.Use(r.authMiddleware.Auth)
 		{
-			routes.POST("/pin", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatPin)             // TODO: not working
-			routes.POST("/unpin", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnpin)         // TODO: not working
-			routes.POST("/archive", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatArchive)     // TODO: not working
-			routes.POST("/unarchive", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnarchive) // TODO: not working
-			routes.POST("/mute", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatMute)           // TODO: not working
-			routes.POST("/unmute", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnmute)       // TODO: not working
+			routes.POST("/pin", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatPin)
+			routes.POST("/unpin", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnpin)
+			routes.POST("/archive", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatArchive)
+			routes.POST("/unarchive", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnarchive)
+			routes.POST("/mute", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatMute)
+			routes.POST("/unmute", r.jidValidationMiddleware.ValidateNumberField(), r.chatHandler.ChatUnmute)
 			routes.POST("/history-sync", r.chatHandler.HistorySyncRequest)
 		}
 	}
+
 	routes = eng.Group("/group")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -183,12 +189,13 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/description", r.jidValidationMiddleware.ValidateNumberField(), r.groupHandler.SetGroupDescription)
 			routes.POST("/create", r.jidValidationMiddleware.ValidateMultipleNumbers("participants"), r.groupHandler.CreateGroup)
 			routes.POST("/participant", r.jidValidationMiddleware.ValidateJIDFields("number", "participants"), r.groupHandler.UpdateParticipant)
-			routes.GET("/myall", r.groupHandler.GetMyGroups) // TODO: not working
+			routes.GET("/myall", r.groupHandler.GetMyGroups)
 			routes.POST("/join", r.groupHandler.JoinGroupLink)
 			routes.POST("/leave", r.jidValidationMiddleware.ValidateNumberField(), r.groupHandler.LeaveGroup)
 			routes.POST("/settings", r.jidValidationMiddleware.ValidateNumberField(), r.groupHandler.UpdateGroupSettings)
 		}
 	}
+
 	routes = eng.Group("/call")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -196,6 +203,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/reject", r.jidValidationMiddleware.ValidateNumberField(), r.callHandler.RejectCall)
 		}
 	}
+
 	routes = eng.Group("/community")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -205,6 +213,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/remove", r.jidValidationMiddleware.ValidateJIDFields("number", "communityId"), r.communityHandler.CommunityRemove)
 		}
 	}
+
 	routes = eng.Group("/label")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -215,6 +224,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.GET("/list", r.labelHandler.GetLabels)
 		}
 	}
+
 	routes = eng.Group("/unlabel")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -223,6 +233,7 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 			routes.POST("/message", r.labelHandler.MessageUnlabel)
 		}
 	}
+
 	routes = eng.Group("/newsletter")
 	{
 		routes.Use(r.authMiddleware.Auth)
@@ -245,6 +256,28 @@ func (r *Routes) AssignRoutes(eng *gin.Engine) {
 		}
 	}
 
+	// Rotas do Typebot
+	routes = eng.Group("/typebot")
+	{
+		routes.Use(r.authMiddleware.Auth)
+		{
+			// Settings
+			routes.POST("/settings", r.typebotHandler.CreateSettings)
+			routes.GET("/settings", r.typebotHandler.FindSettings)
+			routes.PUT("/settings", r.typebotHandler.UpdateSettings)
+
+			// Bots
+			routes.POST("/create", r.typebotHandler.CreateBot)
+			routes.GET("/fetch", r.typebotHandler.FindBots)
+			routes.PUT("/update/:botId", r.typebotHandler.UpdateBot)
+			routes.DELETE("/delete/:botId", r.typebotHandler.DeleteBot)
+
+			// Sessions
+			routes.POST("/start", r.typebotHandler.StartBot)
+			routes.POST("/changeStatus", r.typebotHandler.ChangeStatus)
+			routes.GET("/fetchSessions", r.typebotHandler.FetchSessions)
+		}
+	}
 }
 
 func NewRouter(
@@ -261,6 +294,7 @@ func NewRouter(
 	newsletterHandler newsletter_handler.NewsletterHandler,
 	pollHandler *poll_handler.PollHandler,
 	serverHandler server_handler.ServerHandler,
+	typebotHandler typebot_handler.TypebotHandler,
 ) *Routes {
 	return &Routes{
 		authMiddleware:          authMiddleware,
@@ -277,5 +311,6 @@ func NewRouter(
 		newsletterHandler:       newsletterHandler,
 		pollHandler:             pollHandler,
 		serverHandler:           serverHandler,
+		typebotHandler:          typebotHandler,
 	}
 }

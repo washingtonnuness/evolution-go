@@ -61,6 +61,7 @@ type Config struct {
 	EventIgnoreStatus    bool
 	QrcodeMaxCount       int
 	CheckUserExists      bool
+	TypebotApiVersion     string
 
 	// Logger configurations
 	LogMaxSize    int
@@ -280,6 +281,11 @@ func Load() *Config {
 		checkUserExists = "true"
 	}
 
+	typebotApiVersion := os.Getenv(config_env.TYPEBOT_API_VERSION)
+	if typebotApiVersion == "" {
+		typebotApiVersion = "latest"
+	}
+
 	// Convertendo para int com valores padrão caso estejam vazios
 	major := 0
 	if whatsappVersionMajor != "" {
@@ -375,6 +381,7 @@ func Load() *Config {
 		EventIgnoreStatus:    eventIgnoreStatus == "true",
 		QrcodeMaxCount:       qrMaxCount,
 		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
+		TypebotApiVersion:    typebotApiVersion,
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,

@@ -48,6 +48,7 @@ import (
 	poll_service "github.com/evolution-foundation/evolution-go/pkg/poll/service"
 	storage_interfaces "github.com/evolution-foundation/evolution-go/pkg/storage/interfaces"
 	"github.com/evolution-foundation/evolution-go/pkg/utils"
+	typebot_service "github.com/evolution-foundation/evolution-go/pkg/typebot/service"
 )
 
 type WhatsmeowService interface {
@@ -68,6 +69,9 @@ type WhatsmeowService interface {
 	PasskeyCeremonyStore() *ceremony.Store
 	SubmitPasskeyResponse(instanceId string, resp *types.WebAuthnResponse) error
 	ConfirmPasskey(instanceId string) error
+
+	// SetTypebotService injeta o serviço do Typebot (resolução de dependência circular)
+	SetTypebotService(typebotService typebot_service.TypebotService)
 }
 
 type clientVersion struct {
@@ -97,6 +101,7 @@ type whatsmeowService struct {
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
 	passkeyCeremony    *ceremony.Store
+	typebotService     typebot_service.TypebotService  // typebot service for handling typebot-related operations
 }
 
 type MyClient struct {
@@ -130,6 +135,7 @@ type MyClient struct {
 	loggerWrapper      *logger_wrapper.LoggerManager
 	qrcodeCount        int
 	passkeyCeremony    *ceremony.Store
+	typebotService     typebot_service.TypebotService  // typebot service for handling typebot-related operations
 }
 
 func (mycli *MyClient) persistMessageAsync(message message_model.Message) {
@@ -495,6 +501,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		loggerWrapper:      w.loggerWrapper,
 		qrcodeCount:        0,
 		passkeyCeremony:    w.passkeyCeremony,
+		typebotService:     w.typebotService,  //typebot service for handling typebot-related operations
 	}
 
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
@@ -1132,6 +1139,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		dataMap["expire"] = evt.Expire
 
 		postMap["data"] = dataMap
+
 	case *events.Message:
 		doWebhook = true
 		postMap["event"] = "Message"
@@ -1222,6 +1230,45 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				evt.Info.SenderAlt = cleanedLID
 			}
 		}
+
+		// ========== TYPEBOT INTEGRATION ==========
+		// Extrair conteúdo de texto da mensagem
+		var messageContent string
+		if evt.Message.GetConversation() != "" {
+			messageContent = evt.Message.GetConversation()
+		} else if evt.Message.GetExtendedTextMessage() != nil {
+			messageContent = evt.Message.GetExtendedTextMessage().GetText()
+		} else if evt.Message.GetButtonsResponseMessage() != nil {
+			messageContent = evt.Message.GetButtonsResponseMessage().GetSelectedDisplayText()
+		} else if evt.Message.GetListResponseMessage() != nil {
+			messageContent = evt.Message.GetListResponseMessage().GetTitle()
+		} else if evt.Message.GetInteractiveResponseMessage() != nil {
+			if nf := evt.Message.GetInteractiveResponseMessage().GetNativeFlowResponseMessage(); nf != nil {
+				messageContent = nf.GetName()
+			}
+		}
+
+		// Delegar ao Typebot se houver conteúdo de texto
+		if messageContent != "" && mycli.typebotService != nil {
+			msgInfo := &typebot_service.MessageInfo{
+				RemoteJid: evt.Info.Sender.String(),
+				PushName:  evt.Info.PushName,
+				Content:   messageContent,
+				FromMe:    evt.Info.IsFromMe,
+				MessageID: evt.Info.ID,
+			}
+
+			// Processa no Typebot em paralelo (não bloqueia webhook)
+			go func() {
+				err := mycli.typebotService.ProcessIncomingMessage(mycli.Instance, msgInfo)
+				if err != nil {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogError(
+						"[%s] Typebot processing error: %v", mycli.userID, err,
+					)
+				}
+			}()
+		}
+		// ========== FIM TYPEBOT ==========
 
 		// Auto-marca mensagens como lidas se configurado
 		if mycli.Instance.ReadMessages && !evt.Info.IsFromMe {
@@ -2806,6 +2853,7 @@ func NewWhatsmeowService(
 	mediaStorage storage_interfaces.MediaStorage,
 	natsProducer producer_interfaces.Producer,
 	loggerWrapper *logger_wrapper.LoggerManager,
+	typebotService typebot_service.TypebotService,
 ) WhatsmeowService {
 	// Inicializar PollService de forma segura
 	pollSvc := poll_service.NewPollService(authDB, loggerWrapper)
@@ -2831,12 +2879,16 @@ func NewWhatsmeowService(
 		natsProducer:       natsProducer,
 		loggerWrapper:      loggerWrapper,
 		passkeyCeremony:    ceremony.NewStore(),
+		typebotService:     typebotService,
 	}
 }
 
 // GetPollService retorna o serviço de polls (evita dupla inicialização)
 func (w *whatsmeowService) GetPollService() poll_service.PollService {
 	return w.pollService
+}
+func (w *whatsmeowService) SetTypebotService(typebotService typebot_service.TypebotService) {
+	w.typebotService = typebotService
 }
 
 // PasskeyCeremonyStore exposes the shared ceremony store so the public HTTP
